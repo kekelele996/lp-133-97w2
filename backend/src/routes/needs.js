@@ -83,7 +83,16 @@ router.get('/', asyncHandler(async (req, res) => {
 
 router.get('/:id', asyncHandler(async (req, res) => {
   const [rows] = await pool.query(
-    'SELECT n.*, u.name as user_name, u.phone as user_phone FROM needs n LEFT JOIN users u ON n.user_id = u.id WHERE n.id = ?',
+    `SELECT n.*, u.name as user_name, u.phone as user_phone,
+       o.id as order_id, o.status as order_status, o.service_hours,
+       v.name as volunteer_name
+     FROM needs n
+     LEFT JOIN users u ON n.user_id = u.id
+     LEFT JOIN orders o ON o.need_id = n.id
+     LEFT JOIN users v ON o.volunteer_id = v.id
+     WHERE n.id = ?
+     ORDER BY o.id DESC
+     LIMIT 1`,
     [req.params.id],
   );
 

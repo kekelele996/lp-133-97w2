@@ -74,7 +74,7 @@ const initData = async () => {
         need_id INT NOT NULL,
         user_id INT NOT NULL,
         volunteer_id INT NOT NULL,
-        status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress',
+        status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled') DEFAULT 'in_progress',
         service_hours DECIMAL(8, 2) DEFAULT 0,
         start_time DATETIME,
         end_time DATETIME,
@@ -89,6 +89,14 @@ const initData = async () => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     console.log('✅ 订单表创建完成');
+
+    // 兼容旧库：补充“待居民确认”状态（列定义已包含时重复执行也无副作用）
+    await pool.query(`
+      ALTER TABLE orders
+      MODIFY status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled')
+      DEFAULT 'in_progress'
+    `);
+    console.log('✅ 订单状态枚举检查完成');
 
     // 创建评价表
     await pool.query(`

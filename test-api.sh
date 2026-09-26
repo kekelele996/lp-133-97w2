@@ -151,7 +151,10 @@ ORDERS_RES=$(curl -s "$BASE_URL/orders" \
   -H "Authorization: Bearer $VOLUNTEER_TOKEN")
 
 if echo "$ORDERS_RES" | grep -q "orders" > /dev/null 2>&1; then
-  ORDER_ID=$(echo "$ORDERS_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['orders'][0]['id'])")
+  ORDER_ID=$(echo "$ORDERS_RES" | python3 -c "
+import sys,json
+orders = json.load(sys.stdin)['orders']
+print(next(o['id'] for o in orders if o['need_id'] == $NEED_ID))")
   test_pass "获取订单成功，订单ID: $ORDER_ID"
 else
   echo "响应: $ORDERS_RES"
@@ -160,24 +163,129 @@ fi
 
 echo ""
 
-# 9. 测试完成订单
-test_step "9. 完成订单 (服务时长 2 小时)"
-COMPLETE_RES=$(curl -s -X PUT "$BASE_URL/orders/$ORDER_ID/complete" \
+# 9. 志愿者提交服务时长 -> 待确认（此时不应结算积分）
+test_step "9. 志愿者提交服务时长 (5 小时) -> 待确认"
+SUBMIT_RES=$(curl -s -X PUT "$BASE_URL/orders/$ORDER_ID/submit" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
-  -d '{"service_hours": 2}')
+  -d '{"service_hours": 5}')
 
-if echo "$COMPLETE_RES" | grep -q "服务已完成" > /dev/null 2>&1; then
-  test_pass "订单完成成功"
+if echo "$SUBMIT_RES" | grep -q "等待居民确认" > /dev/null 2>&1; then
+  test_pass "提交成功，订单进入待确认"
 else
-  echo "响应: $COMPLETE_RES"
-  test_fail "完成订单失败"
+  echo "响应: $SUBMIT_RES"
+  test_fail "提交服务时长失败"
 fi
 
 echo ""
 
-# 10. 测试评价订单
-test_step "10. 居民评价订单"
+# 9.1 非法时长校验
+test_step "9.1 非法时长校验 (13 小时应被拒绝)"
+BAD_RES=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE_URL/orders/$ORDER_ID/submit" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
+  -d '{"service_hours": 13}')
+
+if [ "$BAD_RES" = "400" ]; then
+  test_pass "超过 12 小时被正确拒绝 (HTTP 400)"
+else
+  test_fail "非法时长未被拒绝，HTTP: $BAD_RES"
+fi
+
+echo ""
+
+# 9.2 提交后积分不应变化
+test_step "9.2 提交待确认阶段不结算积分"
+PROFILE_RES=$(curl -s "$BASE_URL/user/profile" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN")
+POINTS_BEFORE=$(echo "$PROFILE_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['points'])")
+if [ "$POINTS_BEFORE" = "$INITIAL_POINTS" ]; then
+  test_pass "积分未变化: $POINTS_BEFORE"
+else
+  test_fail "待确认阶段积分被提前结算: $POINTS_BEFORE (应为 $INITIAL_POINTS)"
+fi
+
+echo ""
+
+# 9.3 居民不能代替志愿者提交；志愿者不能确认
+test_step "9.3 权限校验（居民不能提交时长，志愿者不能确认）"
+RES_SUBMIT=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE_URL/orders/$ORDER_ID/submit" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $RESIDENT_TOKEN" \
+  -d '{"service_hours": 2}')
+VOL_CONFIRM=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE_URL/orders/$ORDER_ID/confirm" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN")
+if [ "$RES_SUBMIT" = "403" ] && [ "$VOL_CONFIRM" = "403" ]; then
+  test_pass "越权操作均被拒绝 (403)"
+else
+  test_fail "权限校验异常: 居民提交=$RES_SUBMIT, 志愿者确认=$VOL_CONFIRM"
+fi
+
+echo ""
+
+# 10. 居民退回 -> 订单回到进行中
+test_step "10. 居民退回服务时长"
+REJECT_RES=$(curl -s -X PUT "$BASE_URL/orders/$ORDER_ID/reject" \
+  -H "Authorization: Bearer $RESIDENT_TOKEN")
+
+if echo "$REJECT_RES" | grep -q "重新进入进行中" > /dev/null 2>&1; then
+  test_pass "退回成功，订单回到进行中"
+else
+  echo "响应: $REJECT_RES"
+  test_fail "退回失败"
+fi
+
+echo ""
+
+# 11. 志愿者重新提交服务时长 (2 小时)
+test_step "11. 志愿者重新提交服务时长 (2 小时)"
+SUBMIT_RES2=$(curl -s -X PUT "$BASE_URL/orders/$ORDER_ID/submit" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
+  -d '{"service_hours": 2}')
+
+if echo "$SUBMIT_RES2" | grep -q "等待居民确认" > /dev/null 2>&1; then
+  test_pass "重新提交成功，订单再次进入待确认"
+else
+  echo "响应: $SUBMIT_RES2"
+  test_fail "重新提交服务时长失败"
+fi
+
+echo ""
+
+# 12. 居民确认 -> 完成并结算 (2 小时 = 20 积分)
+test_step "12. 居民确认服务 -> 完成并结算 (2小时=20积分)"
+CONFIRM_RES=$(curl -s -X PUT "$BASE_URL/orders/$ORDER_ID/confirm" \
+  -H "Authorization: Bearer $RESIDENT_TOKEN")
+
+if echo "$CONFIRM_RES" | grep -q "服务已完成" > /dev/null 2>&1; then
+  test_pass "确认成功: $CONFIRM_RES"
+else
+  echo "响应: $CONFIRM_RES"
+  test_fail "居民确认失败"
+fi
+
+echo ""
+
+# 13. 重复确认不应重复加分
+test_step "13. 重复确认不再加分"
+CONFIRM_AGAIN=$(curl -s -X PUT "$BASE_URL/orders/$ORDER_ID/confirm" \
+  -H "Authorization: Bearer $RESIDENT_TOKEN")
+PROFILE_RES=$(curl -s "$BASE_URL/user/profile" \
+  -H "Authorization: Bearer $VOLUNTEER_TOKEN")
+POINTS=$(echo "$PROFILE_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['points'])")
+HOURS=$(echo "$PROFILE_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['service_hours'])")
+EXPECTED_POINTS=$((INITIAL_POINTS + 20))
+if echo "$CONFIRM_AGAIN" | grep -q "请勿重复确认" > /dev/null 2>&1 && [ "$POINTS" = "$EXPECTED_POINTS" ]; then
+  test_pass "重复确认被拒绝，积分只结算一次: $POINTS (原 $INITIAL_POINTS + 20)"
+else
+  test_fail "重复确认处理异常: $CONFIRM_AGAIN, 积分: $POINTS (预期 $EXPECTED_POINTS)"
+fi
+
+echo ""
+
+# 14. 测试评价订单
+test_step "14. 居民评价订单"
 REVIEW_RES=$(curl -s -X POST "$BASE_URL/orders/$ORDER_ID/review" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $RESIDENT_TOKEN" \
@@ -192,8 +300,8 @@ fi
 
 echo ""
 
-# 11. 测试志愿者评价
-test_step "11. 志愿者评价订单"
+# 15. 测试志愿者评价
+test_step "15. 志愿者评价订单"
 REVIEW_RES2=$(curl -s -X POST "$BASE_URL/orders/$ORDER_ID/review" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
@@ -208,15 +316,14 @@ fi
 
 echo ""
 
-# 12. 测试获取用户信息（验证积分）
-test_step "12. 获取志愿者信息（验证积分增加）"
+# 16. 测试获取用户信息（验证积分）
+test_step "16. 获取志愿者信息（验证积分与服务时长）"
 PROFILE_RES=$(curl -s "$BASE_URL/user/profile" \
   -H "Authorization: Bearer $VOLUNTEER_TOKEN")
 
 if echo "$PROFILE_RES" | grep -q "points" > /dev/null 2>&1; then
   POINTS=$(echo "$PROFILE_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['points'])")
   HOURS=$(echo "$PROFILE_RES" | python3 -c "import sys,json; print(json.load(sys.stdin)['user']['service_hours'])")
-  EXPECTED_POINTS=$((INITIAL_POINTS + 20))
   if [ "$POINTS" = "$EXPECTED_POINTS" ]; then
     test_pass "积分正确: $POINTS (原 $INITIAL_POINTS + 服务2小时 20积分), 总服务时长: $HOURS 小时"
   else
@@ -228,8 +335,8 @@ fi
 
 echo ""
 
-# 13. 测试兑换礼品
-test_step "13. 志愿者兑换礼品 (保温杯 100 积分)"
+# 17. 测试兑换礼品
+test_step "17. 志愿者兑换礼品 (保温杯 100 积分)"
 GIFT_ID=1
 EXCHANGE_RES=$(curl -s -X POST "$BASE_URL/gifts/$GIFT_ID/exchange" \
   -H "Content-Type: application/json" \
@@ -244,8 +351,8 @@ fi
 
 echo ""
 
-# 14. 测试获取兑换记录
-test_step "14. 获取兑换记录"
+# 18. 测试获取兑换记录
+test_step "18. 获取兑换记录"
 EXCHANGES_RES=$(curl -s "$BASE_URL/my/exchanges" \
   -H "Authorization: Bearer $VOLUNTEER_TOKEN")
 
@@ -260,8 +367,8 @@ fi
 
 echo ""
 
-# 15. 测试发送消息
-test_step "15. 发送消息"
+# 19. 测试发送消息
+test_step "19. 发送消息"
 MSG_RES=$(curl -s -X POST "$BASE_URL/messages" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $VOLUNTEER_TOKEN" \
@@ -276,8 +383,8 @@ fi
 
 echo ""
 
-# 16. 测试获取消息列表
-test_step "16. 获取消息列表"
+# 20. 测试获取消息列表
+test_step "20. 获取消息列表"
 MSGS_RES=$(curl -s "$BASE_URL/messages?other_user_id=$VOLUNTEER_ID" \
   -H "Authorization: Bearer $RESIDENT_TOKEN")
 
@@ -291,8 +398,8 @@ fi
 
 echo ""
 
-# 17. 测试积分排名
-test_step "17. 获取志愿者排名"
+# 21. 测试积分排名
+test_step "21. 获取志愿者排名"
 RANKING_RES=$(curl -s "$BASE_URL/users/ranking")
 if echo "$RANKING_RES" | grep -q "ranking" > /dev/null 2>&1; then
   RANK_COUNT=$(echo "$RANKING_RES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['ranking']))")
@@ -316,7 +423,11 @@ echo "   ✅ 发布需求"
 echo "   ✅ 需求列表查询"
 echo "   ✅ 接单"
 echo "   ✅ 订单管理"
-echo "   ✅ 完成订单 + 积分计算（2小时=20积分）"
+echo "   ✅ 志愿者提交时长（1-12小时校验）-> 待确认（不结算）"
+echo "   ✅ 权限校验（仅志愿者提交 / 仅居民确认）"
+echo "   ✅ 居民退回 -> 进行中 -> 重新提交"
+echo "   ✅ 居民确认 -> 完成 + 积分结算（2小时=20积分）"
+echo "   ✅ 重复确认不加分"
 echo "   ✅ 双方评价"
 echo "   ✅ 积分兑换礼品（保温杯100积分）"
 echo "   ✅ 兑换记录查询"
