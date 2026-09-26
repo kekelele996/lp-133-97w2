@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS orders (
   need_id INT NOT NULL COMMENT '需求ID',
   user_id INT NOT NULL COMMENT '需求发布者ID',
   volunteer_id INT NOT NULL COMMENT '志愿者ID',
-  status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress' COMMENT '状态',
+  status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled') DEFAULT 'in_progress' COMMENT '状态: in_progress-进行中, pending_confirm-待居民确认, completed-已完成, cancelled-已取消',
   service_hours DECIMAL(8, 2) DEFAULT 0 COMMENT '服务时长(小时)',
   start_time DATETIME COMMENT '开始时间',
   end_time DATETIME COMMENT '结束时间',

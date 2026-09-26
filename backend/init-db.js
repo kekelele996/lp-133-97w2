@@ -74,7 +74,7 @@ const initData = async () => {
         need_id INT NOT NULL,
         user_id INT NOT NULL,
         volunteer_id INT NOT NULL,
-        status ENUM('in_progress', 'completed', 'cancelled') DEFAULT 'in_progress',
+        status ENUM('in_progress', 'pending_confirm', 'completed', 'cancelled') DEFAULT 'in_progress',
         service_hours DECIMAL(8, 2) DEFAULT 0,
         start_time DATETIME,
         end_time DATETIME,

@@ -32,7 +32,14 @@ module.exports = {
   orders: {
     notFound: '订单不存在',
     forbidden: '无权限操作',
-    completed: '服务已完成',
+    invalidServiceHours: '服务时长须为 1 到 12 之间的整数（小时）',
+    notInProgress: '订单当前不是进行中状态，无法提交服务时长',
+    onlyVolunteerSubmit: '只有接单志愿者可以提交服务时长',
+    notPendingConfirm: '订单当前不是待确认状态，居民无法确认或退回',
+    onlyResidentConfirm: '只有发布需求的居民可以确认或退回',
+    submitted: '服务时长已提交，等待居民确认',
+    completed: '居民已确认，服务完成',
+    returned: '已退回，订单回到进行中，志愿者可重新提交服务时长',
     reviewed: '评价成功',
   },
   messages: {

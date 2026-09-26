@@ -6,6 +6,18 @@ const asyncHandler = require('../utils/asyncHandler');
 
 const router = Router();
 
+// 每 1 小时服务时长结算 10 积分
+const POINTS_PER_HOUR = 10;
+
+// 服务时长只接受 1~12 的整数小时
+const parseServiceHours = (value) => {
+  const hours = Number(value);
+  if (!Number.isInteger(hours) || hours < 1 || hours > 12) {
+    return null;
+  }
+  return hours;
+};
+
 router.get('/', authenticateToken, asyncHandler(async (req, res) => {
   const { status } = req.query;
   let sql = `SELECT o.*, n.title, n.type, n.address,
@@ -28,36 +40,140 @@ router.get('/', authenticateToken, asyncHandler(async (req, res) => {
   res.json({ orders: rows });
 }));
 
-router.put('/:id/complete', authenticateToken, asyncHandler(async (req, res) => {
-  const { service_hours } = req.body;
+// 志愿者提交服务时长（1~12 小时），订单进入“待居民确认”，此时不结算
+router.put('/:id/submit', authenticateToken, asyncHandler(async (req, res) => {
   const orderId = req.params.id;
-  const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+  const hours = parseServiceHours(req.body.service_hours);
 
-  if (orders.length === 0) {
-    return res.status(404).json({ message: messages.orders.notFound });
+  if (hours === null) {
+    return res.status(400).json({ message: messages.orders.invalidServiceHours });
   }
 
-  if (orders[0].user_id !== req.user.id && orders[0].volunteer_id !== req.user.id) {
-    return res.status(403).json({ message: messages.orders.forbidden });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [orders] = await conn.query('SELECT * FROM orders WHERE id = ? FOR UPDATE', [orderId]);
+
+    if (orders.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: messages.orders.notFound });
+    }
+
+    const order = orders[0];
+
+    if (order.volunteer_id !== req.user.id) {
+      await conn.rollback();
+      return res.status(403).json({ message: messages.orders.onlyVolunteerSubmit });
+    }
+
+    if (order.status !== 'in_progress') {
+      await conn.rollback();
+      return res.status(400).json({ message: messages.orders.notInProgress });
+    }
+
+    await conn.query(
+      "UPDATE orders SET status = 'pending_confirm', service_hours = ?, end_time = NOW() WHERE id = ?",
+      [hours, orderId],
+    );
+
+    // 需求保持“已接单”，等居民确认后才完成
+    await conn.commit();
+    res.json({ message: messages.orders.submitted });
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
   }
+}));
 
-  await pool.query(
-    "UPDATE orders SET status = 'completed', service_hours = ? WHERE id = ?",
-    [service_hours || 1, orderId],
-  );
+// 居民确认服务：订单与需求一起完成，并按每小时 10 分结算
+// 只有待确认状态可以确认，重复确认不会再加积分
+router.put('/:id/confirm', authenticateToken, asyncHandler(async (req, res) => {
+  const orderId = req.params.id;
 
-  await pool.query(
-    "UPDATE needs SET status = 'completed' WHERE id = ?",
-    [orders[0].need_id],
-  );
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [orders] = await conn.query('SELECT * FROM orders WHERE id = ? FOR UPDATE', [orderId]);
 
-  const hours = service_hours || 1;
-  await pool.query(
-    'UPDATE users SET service_hours = service_hours + ?, points = points + ? WHERE id = ?',
-    [hours, hours * 10, orders[0].volunteer_id],
-  );
+    if (orders.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: messages.orders.notFound });
+    }
 
-  res.json({ message: messages.orders.completed });
+    const order = orders[0];
+
+    if (order.user_id !== req.user.id) {
+      await conn.rollback();
+      return res.status(403).json({ message: messages.orders.onlyResidentConfirm });
+    }
+
+    if (order.status !== 'pending_confirm') {
+      await conn.rollback();
+      return res.status(400).json({ message: messages.orders.notPendingConfirm });
+    }
+
+    const hours = Number(order.service_hours);
+
+    await conn.query("UPDATE orders SET status = 'completed' WHERE id = ?", [orderId]);
+    await conn.query("UPDATE needs SET status = 'completed' WHERE id = ?", [order.need_id]);
+
+    // 积分与服务时长只在确认这一步结算一次；订单此前未完成过，天然不会重复加分
+    await conn.query(
+      'UPDATE users SET service_hours = service_hours + ?, points = points + ? WHERE id = ?',
+      [hours, hours * POINTS_PER_HOUR, order.volunteer_id],
+    );
+
+    await conn.commit();
+    res.json({ message: messages.orders.completed, service_hours: hours, points: hours * POINTS_PER_HOUR });
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
+}));
+
+// 居民退回：订单回到进行中，志愿者可修改时长后重新提交
+router.put('/:id/return', authenticateToken, asyncHandler(async (req, res) => {
+  const orderId = req.params.id;
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [orders] = await conn.query('SELECT * FROM orders WHERE id = ? FOR UPDATE', [orderId]);
+
+    if (orders.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ message: messages.orders.notFound });
+    }
+
+    const order = orders[0];
+
+    if (order.user_id !== req.user.id) {
+      await conn.rollback();
+      return res.status(403).json({ message: messages.orders.onlyResidentConfirm });
+    }
+
+    if (order.status !== 'pending_confirm') {
+      await conn.rollback();
+      return res.status(400).json({ message: messages.orders.notPendingConfirm });
+    }
+
+    await conn.query(
+      "UPDATE orders SET status = 'in_progress', service_hours = 0, end_time = NULL WHERE id = ?",
+      [orderId],
+    );
+
+    await conn.commit();
+    res.json({ message: messages.orders.returned });
+  } catch (err) {
+    await conn.rollback();
+    throw err;
+  } finally {
+    conn.release();
+  }
 }));
 
 router.post('/:id/review', authenticateToken, asyncHandler(async (req, res) => {
